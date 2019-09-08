@@ -4,6 +4,7 @@
     {
         public TokenType Type;
         public string Value;
+        public string Representation;
         public uint Position;
         public uint Line;
 

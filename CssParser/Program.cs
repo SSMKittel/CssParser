@@ -26,7 +26,7 @@ namespace CssParser
                 while (true)
                 {
                     var n = lex.Next().Result;
-                    Console.WriteLine($"{n.Type}; [{n.Value}]");
+                    Console.WriteLine($"{n.Type}; [{n.Value}] [{n.Representation}]");
                     if (n.Type == TokenType.EOF)
                     {
                         break;

@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using System.Globalization;
+using System.Diagnostics;
 
 namespace CssParser.Lexer
 {
@@ -20,6 +21,8 @@ namespace CssParser.Lexer
         private uint _tokenStartLine;
         private uint _tokenStart;
 
+        private StringBuilder _representation;
+
         private Stack<int> _back;
 
         public CssLexer(TextReader css)
@@ -27,6 +30,7 @@ namespace CssParser.Lexer
             _css = new Preprocessor(css);
             _line = 1;
             _position = 0;
+            _representation = new StringBuilder();
             _back = new Stack<int>(5);
         }
 
@@ -34,6 +38,7 @@ namespace CssParser.Lexer
         {
             _tokenStartLine = _line;
             _tokenStart = _position;
+            _representation.Clear();
 
             int current = await Advance();
             if (current == EOF)
@@ -208,7 +213,7 @@ namespace CssParser.Lexer
             }
             else if (current == '{')
             {
-                return Token(TokenType.LeftBrace, "}");
+                return Token(TokenType.LeftBrace, "{");
             }
             else if (current == '}')
             {
@@ -251,10 +256,15 @@ namespace CssParser.Lexer
             bool nextBracket = c == '(';
             if (name.Equals("url", StringComparison.OrdinalIgnoreCase) && nextBracket)
             {
-                await ConsumeWhitespace();
+                string white = await ConsumeWhitespace();
                 int next = await Peek();
                 if (next == '"' || next == '\'')
                 {
+                    // Treat it like a normal function, preserve whitespace token
+                    for (int i = white.Length - 1; i >= 0; i--)
+                    {
+                        PushBack(white[i]);
+                    }
                     return Token(TokenType.Function, name);
                 }
                 return await ReadUrl();
@@ -366,26 +376,26 @@ namespace CssParser.Lexer
 
         private async Task<Token> ReadNumber()
         {
-            var repr = new StringBuilder();
+            var numStr = new StringBuilder();
             int c = await Advance();
             if (c == '+' || c == '-')
             {
-                repr.AppendCodePoint(c);
+                numStr.AppendCodePoint(c);
             }
             else
             {
                 PushBack(c);
             }
 
-            await AppendDigits(repr);
+            await AppendDigits(numStr);
 
             var next3 = await Peek3();
             bool integer = true;
             if (next3[0] == '.' && IsDigit(next3[1]))
             {
                 integer = false;
-                repr.AppendCodePoint(await Advance());
-                await AppendDigits(repr);
+                numStr.AppendCodePoint(await Advance());
+                await AppendDigits(numStr);
                 next3 = null;
             }
 
@@ -395,63 +405,63 @@ namespace CssParser.Lexer
             {
                 if (IsDigit(next3[1]))
                 {
-                    repr.AppendCodePoint(await Advance());
-                    await AppendDigits(repr);
+                    numStr.AppendCodePoint(await Advance());
+                    await AppendDigits(numStr);
                     next3 = null;
                 }
                 else if (next3[1] == '+' || next3[1] == '-')
                 {
                     if (IsDigit(next3[2]))
                     {
-                        repr.AppendCodePoint(await Advance())
+                        numStr.AppendCodePoint(await Advance())
                             .AppendCodePoint(await Advance());
-                        await AppendDigits(repr);
+                        await AppendDigits(numStr);
                         next3 = null;
                     }
                 }
             }
 
-            string reprParse = repr.ToString();
+            string numForParse = numStr.ToString();
 
-            if (reprParse.Length >= 2)
+            if (numForParse.Length >= 2)
             {
-                if (reprParse[0] == '.')
+                if (numForParse[0] == '.')
                 {
-                    repr.Insert(0, '0');
-                    reprParse = reprParse.Insert(0, "0");
+                    numStr.Insert(0, '0');
+                    numForParse = numForParse.Insert(0, "0");
                 }
-                else if ((reprParse[0] == '+' || reprParse[0] == '-') && reprParse[1] == '.')
+                else if ((numForParse[0] == '+' || numForParse[0] == '-') && numForParse[1] == '.')
                 {
-                    reprParse = reprParse.Insert(1, "0");
+                    numForParse = numForParse.Insert(1, "0");
                 }
             }
             var num = new Number
             {
                 Type = integer ? NumberType.Integer : NumberType.Number,
-                Value = decimal.Parse(reprParse, NumberStyles.Float)
+                Value = decimal.Parse(numForParse, NumberStyles.Float)
             };
 
             next3 = next3 ?? await Peek3();
 
             if (next3[0] == '%')
             {
-                repr.AppendCodePoint(await Advance());
-                var tok = Token(TokenType.Percentage, repr.ToString());
+                numStr.AppendCodePoint(await Advance());
+                var tok = Token(TokenType.Percentage, numStr.ToString());
                 tok.Number = num;
                 return tok;
             }
             else if (IsIdent(next3))
             {
                 num.Unit = await ReadName();
-                repr.Append(num.Unit);
+                numStr.Append(num.Unit);
 
-                var tok = Token(TokenType.Dimension, repr.ToString());
+                var tok = Token(TokenType.Dimension, numStr.ToString());
                 tok.Number = num;
                 return tok;
             }
             else
             {
-                var tok = Token(TokenType.Number, repr.ToString());
+                var tok = Token(TokenType.Number, numStr.ToString());
                 tok.Number = num;
                 return tok;
             }
@@ -754,10 +764,12 @@ namespace CssParser.Lexer
 
         private Token Token(TokenType type, string value)
         {
+            Debug.Assert(value.Length != _representation.Length || value == _representation.ToString());
             return new Token
             {
                 Type = type,
                 Value = value,
+                Representation = value.Length == _representation.Length ? value : _representation.ToString(),
                 Line = _tokenStartLine, 
                 Position = _tokenStart,
             };
@@ -765,22 +777,24 @@ namespace CssParser.Lexer
 
         private Token Eof()
         {
-            return Token(TokenType.EOF, null);
+            return Token(TokenType.EOF, "");
         }
 
         private async Task<int> Advance()
         {
-            if (_back.Count != 0)
-            {
-                return _back.Pop();
-            }
-
-            return await _css.ReadAsync();
+            var c = _back.Count == 0 ? await _css.ReadAsync() : _back.Pop();
+            _representation.AppendCodePoint(c);
+            return c;
         }
 
         private void PushBack(int c)
         {
+            if (c == EOF)
+            {
+                return;
+            }
             _back.Push(c);
+            _representation.Length -= (c <= ushort.MaxValue) ? 1 : 2;
         }
 
         public void Dispose()
